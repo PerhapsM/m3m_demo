@@ -1,6 +1,5 @@
 from pathlib import Path
 import re
-import math
 from typing import Dict, List
 
 import numpy as np
@@ -377,6 +376,7 @@ def build_dashboard():
                     "Channels": meta.get("count"),
                     "dtype": meta.get("dtype"),
                     "CRS": meta.get("crs"),
+                    "DateTime": meta.get("tags").get("DateTime"),
                 }
             )
         st.dataframe(pd.DataFrame(mission_meta_rows), use_container_width=True)
@@ -423,14 +423,15 @@ def build_dashboard():
             index=1,
         )
 
-        pixel_x = inspector_col.slider("Pixel X", 0, 500, 250)
-        pixel_y = inspector_col.slider("Pixel Y", 0, 500, 250)
-
         band_file = mission_files.get(selected_band)
         if band_file:
             img = Image.open(band_file)
             arr = np.asarray(img)
             height, width = arr.shape[:2]
+
+            pixel_x = inspector_col.slider("Pixel X", 0, width, width // 2)
+            pixel_y = inspector_col.slider("Pixel Y", 0, height, height // 2)
+
             px_val = arr[min(height - 1, pixel_y), min(width - 1, pixel_x)]
             inspector_plot.metric("Selected Channel", BAND_LABELS.get(selected_band, selected_band))
             inspector_plot.metric("Value", f"{float(px_val):.2f}")
@@ -448,38 +449,99 @@ def build_dashboard():
 
         report_col, map_col = st.columns([1.1, 1.9])
         with report_col:
+            if ndvi_stats is not None:
+                mean_val = ndvi_stats.get("mean")
+                median_val = ndvi_stats.get("median")
+                min_val = ndvi_stats.get("min")
+                max_val = ndvi_stats.get("max")
+                health_area = ndvi_stats.get("health_area_pct")
+
+                mean_text = f"{mean_val:.4f}" if mean_val is not None else "N/A"
+                median_text = f"{median_val:.4f}" if median_val is not None else "N/A"
+                min_text = f"{min_val:.4f}" if min_val is not None else "N/A"
+                max_text = f"{max_val:.4f}" if max_val is not None else "N/A"
+                health_text = f"{health_area:.2f}%" if health_area is not None else "N/A"
+
+                st.markdown(
+                    f"""
+                    <div class="platform-panel">
+                        <h3>Field Report</h3>
+                        <p><b>Mission:</b> {selected_mission}</p>
+                        <p><b>Flight Time:</b> {selected['flight_time']}</p>
+                        <p><b>Band Set:</b> {', '.join(selected_files.keys())}</p>
+                        <p><b>NDVI Mean:</b> {mean_text}</p>
+                        <p><b>NDVI Median:</b> {median_text}</p>
+                        <p><b>NDVI Range:</b> {min_text} to {max_text}</p>
+                        <p><b>Health Area %:</b> {health_text}</p>
+                    </div>
+                    """,
+                    unsafe_allow_html=True,
+                )
+            else:
+                st.markdown(
+                    """
+                    <div class="platform-panel">
+                        <h3>Field Report</h3>
+                        <p><b>Mission:</b> Awaiting complete NIR / Red dataset</p>
+                        <p><b>Flight Time:</b> Not enough data for vegetation summarization</p>
+                    </div>
+                    """,
+                    unsafe_allow_html=True,
+                )
+
+        with map_col:
             st.markdown(
-                """
+                f"""
                 <div class="platform-panel">
-                    <h3>Field Report</h3>
-                    <p><b>Crop Zone:</b> North Block A</p>
-                    <p><b>Field Status:</b> Monitoring / Green-up</p>
-                    <p><b>Recommended Action:</b> Verify NDVI pockets in South range</p>
-                    <p><b>Sample Time:</b> 2023-02-15 10:39</p>
+                    <h3>Field Map / Controller</h3>
+                    <p>Field Grid: {selected_mission} · Flight {selected['flight_time']}</p>
                 </div>
                 """,
                 unsafe_allow_html=True,
             )
 
-        with map_col:
-            st.markdown(
-                """
-                <div class="platform-panel">
-                    <h3>Field Map / Controller</h3>
-                    <p>Field Grid: Block A-02 · Flight 0003</p>
-                </div>
-                """,
-                unsafe_allow_html=True,
-            )
-            map_df = pd.DataFrame(
-                {
-                    "x": [10, 20, 30, 40, 50],
-                    "y": [20, 15, 35, 25, 45],
-                    "value": [0.12, 0.34, 0.52, 0.39, 0.71],
-                }
-            )
-            fig = px.scatter(map_df, x="x", y="y", size="value", hover_data=["value"], title="Field Grid Heat Map")
-            st.plotly_chart(fig, use_container_width=True)
+            if ndvi_map is not None:
+                grid_y, grid_x = ndvi_map.shape
+                y_step = max(1, grid_y // 12)
+                x_step = max(1, grid_x // 12)
+                x_points = []
+                y_points = []
+                values = []
+
+                for yy in range(0, grid_y, y_step):
+                    for xx in range(0, grid_x, x_step):
+                        val = ndvi_map[yy, xx]
+                        if np.isfinite(val):
+                            x_points.append(xx)
+                            y_points.append(yy)
+                            values.append(float(val))
+
+                if x_points:
+                    map_df = pd.DataFrame(
+                        {
+                            "x": x_points,
+                            "y": y_points,
+                            "value": values,
+                            "size": np.abs(values),
+                        }
+                    )
+
+                    # Keep the NDVI column as the semantic payload while using a strictly
+                    # non-negative marker scale for Plotly bubble sizing.
+                    map_df["size"] = np.clip(map_df["size"], 0.01, None)
+                    fig = px.scatter(
+                        map_df,
+                        x="x",
+                        y="y",
+                        size="size",
+                        hover_data={"value": True, "size": False},
+                        title="Field Grid Heat Map (NDVI Sample)",
+                    )
+                    st.plotly_chart(fig, use_container_width=True)
+                else:
+                    st.info("No valid NDVI samples are present for this mission.")
+            else:
+                st.info("NDVI map is not available for the selected mission.")
 
         ndvi_tab, health_tab, charts_tab = st.tabs(["NDVI", "Health Statistics", "Charts"])
 
@@ -499,11 +561,21 @@ def build_dashboard():
 
                 st.metric("Mean NDVI", f"{mean_ndvi:.4f}")
                 st.metric("Median NDVI", f"{median_ndvi:.4f}")
-                st.color_picker("NDVI Color Scale", value="#7dd3fc")
+                # ndvi_color = st.color_picker("NDVI Color Scale", value="#7dd3fc")
+                ndvi_colormap = [
+                    [0.0, "#00008F"],  # -1.0: Deep water
+                    [0.4, "#B3B3B3"],  # -0.2: Clouds / Snow / Rock
+                    [0.5, "#E1CD9A"],  #  0.0: Bare soil / Sand
+                    [0.6, "#A6D654"],  #  0.2: Sparse vegetation
+                    [0.8, "#24A32A"],  #  0.6: Moderate vegetation
+                    [1.0, "#004000"],  #  1.0: Dense canopy forest
+                ]
 
                 ndvi_fig = px.imshow(
                     ndvi,
                     color_continuous_scale="Viridis",
+                    # color_continuous_scale=["#effcf7", ndvi_color],
+                    # color_continuous_scale=ndvi_colormap,
                     labels=dict(color="NDVI"),
                     title="NDVI Heatmap",
                     aspect="auto",
